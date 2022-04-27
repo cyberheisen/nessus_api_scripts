@@ -1,11 +1,12 @@
 # ssh_login_check
 # 1.0 
-# http://www.github.com/cyberheisen
+# Joel Quevedo
 #04.26.2022
 
 import csv
-import requests
 import getpass
+import requests
+import os
 import tqdm
 import urllib3
 
@@ -16,8 +17,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 token = None
 headers = {}
 plugin_id = '84239'
-filename = 'ssh_status.csv'
+filename = './ssh_status.csv'
 results = []
+test = False
 
 # All api http get requests are processed by this function
 def get(url,format):
@@ -53,28 +55,34 @@ def login(username,password):
 
 # This function extracts the token from the authentication response
 def parse_token(data):
-    token = data.get("token")
-    return token
+    error = data.get("error")
+    if not error:
+        token = data.get("token")
+        return token
+    else:
+        print(error)
+        print("Logoff existing sessions or try again later\n")
+        exit(1)
 
 # This function ends our Nessus session
 def end_session():
-    print("[+] Logging off")
+    print("\n[+] Logging off")
     try:
         url = base_url + "/session"
         r = requests.delete(url=url, headers=headers, verify=False)
         if r.status_code == 200:
-            print("[+] Logged off")
+            print("[-] Logged off")
             exit(0)
         else:
             print("[!] Not Logged in")
     except requests.exceptions.RequestException as e:
         raise SystemExit(e)
-        end_session()
+        exit(1)
     return 
 
 # This function will export the final results to a csv file.
 def writeCSV(data,filename):
-    print ("[+] Writing Results to %s\n" % filename)
+    print ("\n[+] Writing Results")
     header = ['hostname','status']
     try:
         with open(filename, 'a') as f:
@@ -86,6 +94,7 @@ def writeCSV(data,filename):
         end_session()
         print(e)
         exit()
+    print("[-] Wrote %s bytes to %s" % (os.stat(filename).st_size,filename))
 
 # this function requests the Nessus Scan results
 def get_scan(scan_id):
@@ -93,18 +102,18 @@ def get_scan(scan_id):
     print("[+] Retrieving scan and plugin information\n")
     data = get(url,"json")
     hosts = data.get("hosts")
-    total_hosts = len(hosts)
+    return hosts
 
-    for host in hosts:
-        #tqdm gives us the nice progress bar
-        for i in tqdm.tqdm(range(total_hosts)):
-            # we need the hostname for our final output
-            hostname = host.get("hostname")
-            # we need the host_id in order to retrieve plugin information
-            host_id = str(host.get("host_id"))
-            # get the plugin information for each host
-            get_plugin_info(hostname,host_id,plugin_id,scan_id)    
-    return
+# This function validate that the Debugging Log Report plugin exists in the scan.
+def test_for_plugin(hostname,host_id,plugin_id,scan_id):
+    url = base_url+"/scans/" + scan_id + "/hosts/" + str(host_id) + "/plugins/" + plugin_id
+    data = get(url,"json")
+    outputs_dict = data.get("outputs")
+    if outputs_dict == None:
+        print ("[!] The Debugging Log Report plugin was not enabled for this scan.  Ensure plugin 84239 is enabled\n")
+        end_session() 
+    else:
+        return
 
 # This function extracts the plugin information for a given scan result
 def get_plugin_info(hostname,host_id,plugin_id,scan_id):
@@ -114,6 +123,7 @@ def get_plugin_info(hostname,host_id,plugin_id,scan_id):
     url = base_url+"/scans/" + scan_id + "/hosts/" + host_id + "/plugins/" + plugin_id
     data = get(url,"json")
     outputs_dict = data.get("outputs")
+    
     for output in outputs_dict:
         ports_dict = output.get("ports")
         for port in ports_dict:
@@ -130,10 +140,7 @@ def get_plugin_info(hostname,host_id,plugin_id,scan_id):
                     # we pass the relevant information to obtain a parsed status for our host
                     status = get_attachment(scan_id,attachment_id,attachment_key)
                     result.append(status)
-                    #print(hostname + "," + status)
-        # Here is where we add a single host record to our global list
-        results.append(result)
-    return results
+    return result
 
 # This function obtains the specific attachment and processes the information 
 def get_attachment(scan_id,attachment_id,attachment_key):
@@ -155,11 +162,11 @@ def get_attachment(scan_id,attachment_id,attachment_key):
 if __name__ == "__main__":
     
     #Nessus API documentation is available at http://<nessusserver>:8834/api
-
+    print("This program provides a listing of hosts and their ssh login status during a scan. In order to operate, the Debugging log report plugin (84239) must have been enabled for the scan.\n")
     #Obtain the credentials for the Nessus Server
     username = input("Username: ")
     password = getpass.getpass(prompt="Password: ",stream=None)
-    
+
     #The nessus server url and scan id information will be extracted from the full url
     # of the nessus scan results
     scan_url = input("Enter the full url for the Nessus scan results: ")
@@ -169,25 +176,40 @@ if __name__ == "__main__":
 
     #With the Nessus url in hand now, we can authenticate and obtain a token.
     #The token is used to authorize each API request.
-    token = parse_token(login(username,password)) 
-
+    raw_token = login(username,password)
+    token = parse_token(raw_token) 
+ 
     # if we have a valid token... 
     if token:
         # add the token value to our headers going forward
         headers = {"X-Cookie":"token=" + token}
-        print("[+] Logged in as %s" % username)
+        print("\n[+] Logged in as %s" % username)
         
-        
-        
-        # and let's pull the scan results
-        get_scan(scan_id)
-       
-        # Once the attachment information is retrieved and parsed, write the results
+        # and let's dive into the scan results
+        hosts = get_scan(scan_id)
+ 
+
+        #we need to validate the debugging log report plugin was enabled
+        #we'll do a quick check on the first host.
+        test_for_plugin(hosts[0].get("hostname"),hosts[0].get("host_id"),plugin_id,scan_id)
+
+        # How many hosts are in the scan?
+        total_hosts = len(hosts)
+        #Now we cycle through the lists of hosts
+        #tqdm gives us the nice progress bar
+        for i in tqdm.tqdm(range(total_hosts)):
+            # we need the hostname for our final output
+            hostname = hosts[i].get("hostname")
+            # we need the host_id in order to retrieve plugin information
+            host_id = str(hosts[i].get("host_id"))
+            # get the plugin information for each host
+            result = get_plugin_info(hostname,host_id,plugin_id,scan_id)
+            results.append(result)           
+
+        # Once all attachment information is retrieved and parsed, write the results
         # to a csv file.
         writeCSV(results,filename)
-        print("[+] Done!\n")
     else:
         print("Error logging in")
-    # we're done, so let's end the session.
+    # we're done, so let's end the session and program.
     end_session()
-    exit()
