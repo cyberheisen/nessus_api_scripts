@@ -1,6 +1,6 @@
 # ssh_login_check
 # 1.0 
-# Joel Quevedo
+# http://www.github.com/cyberheisen
 #04.26.2022
 
 import csv
